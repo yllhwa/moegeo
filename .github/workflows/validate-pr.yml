@@ -1,0 +1,100 @@
+name: Validate Geofeed PR
+
+on:
+  pull_request:
+    paths:
+      - 'feeds/**'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: pip install requests pyyaml
+
+      - name: Get changed files
+        id: changed-files
+        run: |
+          # Only check for new or modified .yml files in feeds/ directory
+          FILES=$(git diff --name-only origin/${{ github.base_ref }} ${{ github.sha }} | grep '^feeds/.*\.yml$' || true)
+          # Replace newlines with spaces
+          FILES_SPACE=$(echo "$FILES" | tr '\n' ' ')
+          echo "files=$FILES_SPACE" >> $GITHUB_OUTPUT
+
+      - name: Check Commit Signature and Email
+        id: commit-info
+        run: |
+          PR_HEAD_SHA=${{ github.event.pull_request.head.sha }}
+          API_URL="https://api.github.com/repos/${{ github.repository }}/commits/$PR_HEAD_SHA"
+          RES=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" $API_URL)
+          VERIFIED=$(echo "$RES" | jq -r '.commit.verification.verified // false')
+          COMMIT_EMAIL=$(echo "$RES" | jq -r '.commit.author.email // "null"')
+          
+          echo "verified=$VERIFIED" >> $GITHUB_OUTPUT
+          echo "email=$COMMIT_EMAIL" >> $GITHUB_OUTPUT
+
+      - name: Run Validation
+        id: validation
+        run: |
+          FILES="${{ steps.changed-files.outputs.files }}"
+          if [ -z "$FILES" ] || [ "$FILES" = " " ]; then
+            echo "No feed files to validate."
+            exit 0
+          fi
+          
+          VERIFIED="${{ steps.commit-info.outputs.verified }}"
+          EMAIL="${{ steps.commit-info.outputs.email }}"
+          
+          ALL_PASSED=true
+          COMMENTS=""
+          
+          for file in $FILES; do
+            if [ ! -f "$file" ]; then
+                continue # Skip deleted files
+            fi
+            
+            echo "Validating $file..."
+            OUTPUT=$(python scripts/validate_feed.py "$file" "$EMAIL" "$VERIFIED" 2>&1)
+            EXIT_CODE=$?
+            
+            COMMENTS="${COMMENTS}\n\n### Validation for \`$file\`\n"
+            if [ $EXIT_CODE -eq 0 ]; then
+              COMMENTS="${COMMENTS}✅ **Passed**\n\`\`\`\n${OUTPUT}\n\`\`\`"
+            else
+              COMMENTS="${COMMENTS}❌ **Failed**\n\`\`\`\n${OUTPUT}\n\`\`\`"
+              ALL_PASSED=false
+            fi
+          done
+          
+          # Write EOF safe block
+          echo "comment<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$COMMENTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          if [ "$ALL_PASSED" = false ]; then
+            echo "Validation failed for one or more files."
+            exit 1
+          fi
+
+      - name: Comment on PR
+        if: always() && steps.validation.outputs.comment != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = `${{ steps.validation.outputs.comment }}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });

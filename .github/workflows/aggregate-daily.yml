@@ -1,0 +1,32 @@
+name: Daily Geofeed Aggregation
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Runs at 02:00 UTC every day
+  workflow_dispatch:      # Allows manual trigger
+
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Aggregation
+        run: python scripts/aggregate_feeds.py
+
+      - name: Commit and Push changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add output/geofeed.csv
+          # Only commit and push if there are changes
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: daily geofeed aggregation update" && git push)
